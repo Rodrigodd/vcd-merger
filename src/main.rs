@@ -62,19 +62,19 @@ fn next_code() -> IdCode {
     static CURR_CODE: Mutex<IdCode> = Mutex::new(IdCode([0; 4])); // '!'
     let mut code = CURR_CODE.lock().unwrap();
 
-    for (i, c) in code.0.iter_mut().enumerate() {
+    for b in code.0.iter_mut() {
         // '~'
-        if *c == 0x0 {
+        if *b == 0x0 {
             // '!'
-            *c = 0x21;
+            *b = 0x21;
             break;
         }
-        if *c < 0x7E {
-            *c += 1;
+        if *b < 0x7E {
+            *b += 1;
             break;
         } else {
             // '!'
-            *c = 0x21;
+            *b = 0x21;
         }
     }
 
@@ -140,33 +140,38 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<impl BufRead
 
                     assert_eq!(end, "$end");
 
-                    declarations.push(format!("$scope {} {}", module, name));
+                    declarations.push(format!("$scope {} {} $end", module, name));
                 }
                 "$var" => {
                     let ty = tokens.next().unwrap();
                     let width = tokens.next().unwrap();
-                    let id = tokens.next().unwrap();
+                    let old_id = tokens.next().unwrap();
                     let name = take_to_end(&mut tokens);
 
-                    println!("{} {} {} {}", ty, width, id, name);
+                    println!("{} {} {} {}", ty, width, old_id, name);
 
                     let new_id = next_code();
 
-                    symbol_map.insert(IdCode::from(id.as_bytes()), new_id);
+                    symbol_map.insert(IdCode::from(old_id.as_bytes()), new_id);
 
-                    declarations.push(format!("$var {} {} {} {}", ty, width, id, name));
+                    declarations.push(format!(
+                        "$var {} {} {} {}",
+                        ty,
+                        width,
+                        std::str::from_utf8(new_id.as_bytes()).unwrap(),
+                        name
+                    ));
                 }
                 "$upscope" => {
                     let end = tokens.next().unwrap();
                     assert_eq!(end, "$end");
                     println!("$upscope");
-                    declarations.push("$upscope".to_string());
+                    declarations.push("$upscope $end".to_string());
                 }
                 "$enddefinitions" => {
                     let end = tokens.next().unwrap();
                     assert_eq!(end, "$end");
                     println!("$enddefinitions");
-                    declarations.push("$enddefinitions".to_string());
                     break;
                 }
                 "$dumpvars" => {
@@ -199,21 +204,27 @@ fn write_output(
     if let Some(date) = headers.date {
         out_writer.write_all(b"$date ")?;
         out_writer.write_all(date.as_bytes())?;
+        out_writer.write_all(b" $end\n")?;
     }
     if let Some(version) = headers.version {
         out_writer.write_all(b"$version ")?;
         out_writer.write_all(version.as_bytes())?;
+        out_writer.write_all(b" $end\n")?;
     }
     if let Some(timescale) = headers.timescale {
         out_writer.write_all(b"$timescale ")?;
         out_writer.write_all(timescale.as_bytes())?;
+        out_writer.write_all(b" $end\n")?;
     }
 
     for vcd in vcds.iter() {
         for line in vcd.declarations.iter() {
             out_writer.write_all(line.as_bytes())?;
+            out_writer.write_all(b" $end\n")?;
         }
     }
+
+    out_writer.write_all(b"$enddefinitions $end\n")?;
 
     writeln!(out_writer, "$dumpvars").unwrap();
 
