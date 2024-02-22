@@ -1,5 +1,5 @@
 use fxhash::FxHashMap as HashMap;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufWriter, Cursor, Write};
 use std::sync::Mutex;
 
 // this can only represent 93^4 = 74_805_201 symbols.
@@ -93,11 +93,13 @@ fn take_to_end(tokens: &mut impl Iterator<Item = String>) -> String {
     scale
 }
 
-fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<impl BufRead>> {
+fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<Cursor<memmap2::Mmap>>> {
     let mut vcds = Vec::new();
     for input in inputs {
         let file = std::fs::File::open(input).unwrap();
-        let mut reader = BufReader::with_capacity(0x1_0000, file);
+        // let mut reader = BufReader::with_capacity(0x1_0000, file);
+        let memmap = unsafe { memmap2::MmapOptions::new().map(&file).unwrap() };
+        let mut reader = std::io::Cursor::new(memmap);
 
         let mut lines = (&mut reader).lines().map_while(Result::ok);
 
@@ -196,7 +198,7 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<impl BufRead
 fn write_output(
     output: &String,
     headers: Header,
-    mut vcds: Vec<Vcd<impl BufRead>>,
+    mut vcds: Vec<Vcd<Cursor<memmap2::Mmap>>>,
 ) -> std::io::Result<()> {
     let out_file = std::fs::File::create(output).unwrap();
     let mut out_writer = BufWriter::new(out_file);
@@ -228,15 +230,13 @@ fn write_output(
 
     writeln!(out_writer, "$dumpvars").unwrap();
 
-    for mut vcd in vcds {
-        let mut line_buf = Vec::new();
-
-        while vcd.reader.read_until(b'\n', &mut line_buf)? > 0 {
-            let line = &line_buf[..line_buf.len() - 1];
-
+    for vcd in vcds {
+        let memmap = vcd.reader.into_inner();
+        for line in memmap.split(|x| *x == b'\n') {
             match &line {
                 [b'#', ..] => {
-                    out_writer.write_all(&line_buf)?;
+                    out_writer.write_all(line)?;
+                    out_writer.write_all(b"\n")?;
                 }
                 [b'b', ..] | [b'r', ..] => {
                     let pos = line.iter().position(|c| *c == b' ').unwrap();
@@ -258,6 +258,9 @@ fn write_output(
                 [b'$', ..] => {
                     println!("skipping {}", std::str::from_utf8(line).unwrap());
                 }
+                [] => {
+                    println!("empty line");
+                }
                 _ => {
                     let value = &line[0..1];
                     let symbol = &line[1..];
@@ -267,8 +270,6 @@ fn write_output(
                     out_writer.write_all(b"\n")?;
                 }
             }
-
-            line_buf.clear()
         }
     }
 
