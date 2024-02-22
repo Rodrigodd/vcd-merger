@@ -97,7 +97,7 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<impl BufRead
     let mut vcds = Vec::new();
     for input in inputs {
         let file = std::fs::File::open(input).unwrap();
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::with_capacity(0x1_0000, file);
 
         let mut lines = (&mut reader).lines().map_while(Result::ok);
 
