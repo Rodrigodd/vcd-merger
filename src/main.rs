@@ -201,7 +201,7 @@ fn write_output(
     mut vcds: Vec<Vcd<Cursor<memmap2::Mmap>>>,
 ) -> std::io::Result<()> {
     let out_file = std::fs::File::create(output).unwrap();
-    let mut out_writer = BufWriter::new(out_file);
+    let mut out_writer = BufWriter::with_capacity(0x1_0000, out_file); // 64KiB
 
     if let Some(date) = headers.date {
         out_writer.write_all(b"$date ")?;
