@@ -140,7 +140,7 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<impl BufRead
 
                     assert_eq!(end, "$end");
 
-                    declarations.push(format!("$scope {} {} $end", module, name));
+                    declarations.push(format!("$scope {} {} $end\n", module, name));
                 }
                 "$var" => {
                     let ty = tokens.next().unwrap();
@@ -155,23 +155,23 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<impl BufRead
                     symbol_map.insert(IdCode::from(old_id.as_bytes()), new_id);
 
                     declarations.push(format!(
-                        "$var {} {} {} {}",
+                        "$var {} {} {} {} $end\n",
                         ty,
                         width,
                         std::str::from_utf8(new_id.as_bytes()).unwrap(),
-                        name
+                        name.trim()
                     ));
                 }
                 "$upscope" => {
                     let end = tokens.next().unwrap();
                     assert_eq!(end, "$end");
                     println!("$upscope");
-                    declarations.push("$upscope $end".to_string());
+                    declarations.push("$upscope $end\n".to_string());
                 }
                 "$enddefinitions" => {
                     let end = tokens.next().unwrap();
                     assert_eq!(end, "$end");
-                    println!("$enddefinitions");
+                    println!("$enddefinitions $end\n");
                     break;
                 }
                 "$dumpvars" => {
@@ -196,7 +196,7 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<impl BufRead
 fn write_output(
     output: &String,
     headers: Header,
-    vcds: Vec<Vcd<impl BufRead>>,
+    mut vcds: Vec<Vcd<impl BufRead>>,
 ) -> std::io::Result<()> {
     let out_file = std::fs::File::create(output).unwrap();
     let mut out_writer = BufWriter::new(out_file);
@@ -217,11 +217,11 @@ fn write_output(
         out_writer.write_all(b" $end\n")?;
     }
 
-    for vcd in vcds.iter() {
+    for vcd in vcds.iter_mut() {
         for line in vcd.declarations.iter() {
             out_writer.write_all(line.as_bytes())?;
-            out_writer.write_all(b" $end\n")?;
         }
+        vcd.declarations = Vec::new();
     }
 
     out_writer.write_all(b"$enddefinitions $end\n")?;
