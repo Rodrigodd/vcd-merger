@@ -247,7 +247,16 @@ fn write_output(
     for vcd in vcds {
         let memmap = vcd.reader.into_inner();
         let start = memmap.as_ptr() as usize;
-        for (i, line) in memmap.split(|x| *x == b'\n').enumerate() {
+
+        let needle = b"$enddefinitions $end\n";
+        let pos = memmap
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+
+        let lines = memmap[pos + needle.len()..].split(|x| *x == b'\n');
+
+        for (i, line) in lines.enumerate() {
             // My test file runs at 17 millions lines per second. Thats is about 270 thousands
             // lines every 16ms, around ~2^18 = 4 * 2^16 = 0x4_0000.
             // But I am running this on a SSD, so maybe it is not the best calibration for a HDD
