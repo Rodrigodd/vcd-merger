@@ -203,6 +203,19 @@ fn write_output(
     let out_file = std::fs::File::create(output).unwrap();
     let mut out_writer = BufWriter::with_capacity(0x1_0000, out_file); // 64KiB
 
+    let total_len = vcds
+        .iter()
+        .map(|vcd| vcd.reader.get_ref().len() as u64)
+        .sum::<u64>();
+    const TEMPLATE: &str =
+        "{elapsed_precise} █{bar:60.cyan/blue}█ {bytes}/{total_bytes} {binary_bytes_per_sec} ({eta})";
+    let bar = indicatif::ProgressBar::new(total_len).with_style(
+        indicatif::ProgressStyle::default_bar()
+            .template(TEMPLATE)
+            .unwrap()
+            .progress_chars("█▉▊▋▌▍▎▏  "),
+    );
+
     if let Some(date) = headers.date {
         out_writer.write_all(b"$date ")?;
         out_writer.write_all(date.as_bytes())?;
@@ -230,9 +243,20 @@ fn write_output(
 
     writeln!(out_writer, "$dumpvars").unwrap();
 
+    let mut progress = 0;
     for vcd in vcds {
         let memmap = vcd.reader.into_inner();
-        for line in memmap.split(|x| *x == b'\n') {
+        let start = memmap.as_ptr() as usize;
+        for (i, line) in memmap.split(|x| *x == b'\n').enumerate() {
+            // My test file runs at 17 millions lines per second. Thats is about 270 thousands
+            // lines every 16ms, around ~2^18 = 4 * 2^16 = 0x4_0000.
+            // But I am running this on a SSD, so maybe it is not the best calibration for a HDD
+            // user (if the disk is the bottleneck, that is);
+            if i % 0x4_0000 == 0 {
+                let offset = line.as_ptr() as usize - start;
+                bar.set_position(progress + offset as u64);
+            }
+
             match &line {
                 [b'#', ..] => {
                     out_writer.write_all(line)?;
@@ -256,10 +280,10 @@ fn write_output(
                     out_writer.write_all(b"\n")?;
                 }
                 [b'$', ..] => {
-                    println!("skipping {}", std::str::from_utf8(line).unwrap());
+                    // println!("skipping {}", std::str::from_utf8(line).unwrap());
                 }
                 [] => {
-                    println!("empty line");
+                    // println!("empty line");
                 }
                 _ => {
                     let value = &line[0..1];
@@ -271,7 +295,11 @@ fn write_output(
                 }
             }
         }
+
+        progress += memmap.len() as u64;
     }
+
+    bar.finish();
 
     Ok(())
 }
