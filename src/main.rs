@@ -2,7 +2,7 @@ use fxhash::FxHashMap as HashMap;
 use std::io::{BufRead, BufWriter, Cursor, Write};
 use std::sync::Mutex;
 
-// this can only represent 93^4 = 74_805_201 symbols.
+// this can only represent 94^4 = 78_074_896 symbols.
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
 struct IdCode([u8; 4]);
 impl From<&[u8]> for IdCode {
