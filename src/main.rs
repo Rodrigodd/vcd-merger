@@ -340,6 +340,8 @@ fn write_output<'a>(
     );
 
     let mut progress = 0;
+    let mut line_count: usize = 0;
+
     'sections: while let Some(mut heap_entry) = heap.peek_mut() {
         let Reverse((_, index)) = *heap_entry;
         let section = &mut sections[index];
@@ -354,6 +356,17 @@ fn write_output<'a>(
         }
 
         for line in lines {
+            progress += line.len() as u64 + 1;
+            line_count += 1;
+
+            // My test file runs at 17 millions lines per second. Thats is about 270 thousands
+            // lines every 16ms, around ~2^18 = 4 * 2^16 = 0x4_0000.
+            // But I am running this on a SSD, so maybe it is not the best calibration for a HDD
+            // user (if the disk is the bottleneck, that is);
+            if line_count % 0x4_0000 == 0 {
+                bar.set_position(progress);
+            }
+
             match &line {
                 [b'#', ..] => {
                     let offset = line.as_ptr() as usize - section.section.as_ptr() as usize;
@@ -364,9 +377,6 @@ fn write_output<'a>(
                         vcd: section.vcd,
                     };
                     *heap_entry = Reverse((value, index));
-
-                    progress += offset as u64;
-                    bar.set_position(progress);
 
                     continue 'sections;
                 }
