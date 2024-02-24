@@ -1,5 +1,6 @@
 use fxhash::FxHashMap as HashMap;
-use std::io::{BufRead, BufWriter, Cursor, Write};
+use memmap2::Mmap;
+use std::io::{BufRead, BufWriter, Write};
 use std::sync::Mutex;
 
 // this can only represent 94^4 = 78_074_896 symbols.
@@ -25,12 +26,13 @@ impl IdCode {
     }
 }
 
-struct Vcd<B: BufRead> {
+struct Vcd {
     /// Map from old symbol to new symbol.
     symbol_map: HashMap<IdCode, IdCode>,
     /// All scope and var declarations.
     declarations: Vec<String>,
-    reader: B,
+    file: Mmap,
+    end_of_definitions: usize,
 }
 
 #[derive(Default)]
@@ -93,7 +95,7 @@ fn take_to_end(tokens: &mut impl Iterator<Item = String>) -> String {
     scale
 }
 
-fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<Cursor<memmap2::Mmap>>> {
+fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
     let mut vcds = Vec::new();
     for input in inputs {
         let file = std::fs::File::open(input).unwrap();
@@ -188,25 +190,19 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd<Cursor<memma
         let vcd = Vcd {
             symbol_map,
             declarations,
-            reader,
+            end_of_definitions: reader.position() as usize,
+            file: reader.into_inner(),
         };
         vcds.push(vcd);
     }
     vcds
 }
 
-fn write_output(
-    output: &String,
-    headers: Header,
-    mut vcds: Vec<Vcd<Cursor<memmap2::Mmap>>>,
-) -> std::io::Result<()> {
+fn write_output(output: &String, headers: Header, mut vcds: Vec<Vcd>) -> std::io::Result<()> {
     let out_file = std::fs::File::create(output).unwrap();
     let mut out_writer = BufWriter::with_capacity(0x1_0000, out_file); // 64KiB
 
-    let total_len = vcds
-        .iter()
-        .map(|vcd| vcd.reader.get_ref().len() as u64)
-        .sum::<u64>();
+    let total_len = vcds.iter().map(|vcd| vcd.file.len() as u64).sum::<u64>();
     const TEMPLATE: &str =
         "{elapsed_precise} █{bar:60.cyan/blue}█ {bytes}/{total_bytes} {binary_bytes_per_sec} ({eta})";
     let bar = indicatif::ProgressBar::new(total_len).with_style(
@@ -245,16 +241,10 @@ fn write_output(
 
     let mut progress = 0;
     for vcd in vcds {
-        let memmap = vcd.reader.into_inner();
+        let memmap = vcd.file;
         let start = memmap.as_ptr() as usize;
 
-        let needle = b"$enddefinitions $end\n";
-        let pos = memmap
-            .windows(needle.len())
-            .position(|window| window == needle)
-            .unwrap();
-
-        let lines = memmap[pos + needle.len()..].split(|x| *x == b'\n');
+        let lines = memmap[vcd.end_of_definitions..].split(|x| *x == b'\n');
 
         for (i, line) in lines.enumerate() {
             // My test file runs at 17 millions lines per second. Thats is about 270 thousands
