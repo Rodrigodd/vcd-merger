@@ -342,15 +342,20 @@ fn write_output<'a>(
     let mut progress = 0;
     let mut line_count: usize = 0;
 
+    let mut last_timestamp = None;
+
     'sections: while let Some(mut heap_entry) = heap.peek_mut() {
         let Reverse((_, index)) = *heap_entry;
         let section = &mut sections[index];
         let mut lines = section.section.split(|x| *x == b'\n');
 
-        // skip the first line
+        // write the timestamp
         if let Some(line) = lines.next() {
-            out_writer.write_all(line)?;
-            out_writer.write_all(b"\n")?;
+            if last_timestamp != Some(section.value) {
+                out_writer.write_all(line)?;
+                out_writer.write_all(b"\n")?;
+            }
+            last_timestamp = Some(section.value);
         } else {
             unreachable!("a section always start with a timestamp");
         }
