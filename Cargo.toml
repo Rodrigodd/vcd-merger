@@ -13,3 +13,8 @@ memmap2 = "0.9.4"
 [profile.release]
 
 debug = true
+
+[dev-dependencies]
+assert_cmd = "2.0.14"
+assert_fs = "1.1.1"
+predicates = "3.1.0"

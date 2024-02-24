@@ -1,5 +1,7 @@
 use fxhash::FxHashMap as HashMap;
 use memmap2::Mmap;
+use std::cmp::Reverse;
+use std::collections::binary_heap::PeekMut;
 use std::io::{BufRead, BufWriter, Write};
 use std::sync::Mutex;
 
@@ -57,7 +59,11 @@ fn main() {
 
     let vcds = parse_headers(inputs, &mut headers);
 
-    write_output(output, headers, vcds).unwrap();
+    let sections = find_sections(&vcds);
+
+    println!("split in {} sections", sections.len());
+
+    write_output(output, headers, &vcds, sections).unwrap();
 }
 
 fn next_code() -> IdCode {
@@ -106,7 +112,7 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
         let mut lines = (&mut reader).lines().map_while(Result::ok);
 
         let mut tokens = lines.by_ref().flat_map(|line| {
-            line.split_whitespace()
+            line.split_ascii_whitespace()
                 .map(String::from)
                 .collect::<Vec<_>>()
         });
@@ -198,11 +204,100 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
     vcds
 }
 
-fn write_output(output: &String, headers: Header, mut vcds: Vec<Vcd>) -> std::io::Result<()> {
+struct Section<'a> {
+    value: u64,
+    section: &'a [u8],
+    vcd: &'a Vcd,
+}
+impl<'a> PartialEq for Section<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+impl<'a> PartialOrd for Section<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<'a> Ord for Section<'a> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.value.cmp(&other.value)
+    }
+}
+impl<'a> Eq for Section<'a> {}
+
+fn parse_u64(s: &[u8]) -> Result<u64, ()> {
+    let mut value = 0;
+    for &b in s {
+        if !b.is_ascii_digit() {
+            return Err(());
+        }
+        value = value * 10 + (b - b'0') as u64;
+    }
+    Ok(value)
+}
+
+// Find sections of sorted signal changes. These will be merged sorted when written to the output
+// file.
+fn find_sections(vcds: &[Vcd]) -> Vec<Section> {
+    let mut sections = Vec::new();
+
+    for vcd in vcds {
+        let lines = vcd.file[vcd.end_of_definitions..].split(|&b| b == b'\n');
+        let mut curr_section = None;
+
+        for line in lines {
+            if let [b'#', ..] = line {
+                let offset = line.as_ptr() as usize - vcd.file.as_ptr() as usize;
+                let curr_line_value = parse_u64(&line[1..]).unwrap();
+
+                // if this is the first line, start a new section
+                let Some((section_offset, section_value, last_line_value)) = curr_section else {
+                    curr_section = Some((offset, curr_line_value, curr_line_value));
+                    continue;
+                };
+
+                // if out of order, end this section here
+                if curr_line_value < last_line_value {
+                    let section = &vcd.file[section_offset..offset];
+
+                    sections.push(Section {
+                        value: section_value,
+                        section,
+                        vcd,
+                    });
+
+                    curr_section = Some((offset, curr_line_value, curr_line_value));
+                } else {
+                    curr_section = Some((section_offset, section_value, curr_line_value));
+                }
+            }
+        }
+
+        // add the last section
+        if let Some((last_line_offset, last_line_value, _)) = curr_section {
+            let section = &vcd.file[last_line_offset..];
+            sections.push(Section {
+                value: last_line_value,
+                section,
+                vcd,
+            });
+        }
+    }
+
+    sections
+}
+
+fn write_output<'a>(
+    output: &String,
+    headers: Header,
+    vcds: &'a [Vcd],
+    mut sections: Vec<Section<'a>>,
+) -> std::io::Result<()> {
     let out_file = std::fs::File::create(output).unwrap();
     let mut out_writer = BufWriter::with_capacity(0x1_0000, out_file); // 64KiB
 
-    let total_len = vcds.iter().map(|vcd| vcd.file.len() as u64).sum::<u64>();
+    let total_len = sections.iter().map(|s| s.section.len() as u64).sum::<u64>();
     const TEMPLATE: &str =
         "{elapsed_precise} █{bar:60.cyan/blue}█ {bytes}/{total_bytes} {binary_bytes_per_sec} ({eta})";
     let bar = indicatif::ProgressBar::new(total_len).with_style(
@@ -215,65 +310,81 @@ fn write_output(output: &String, headers: Header, mut vcds: Vec<Vcd>) -> std::io
     if let Some(date) = headers.date {
         out_writer.write_all(b"$date ")?;
         out_writer.write_all(date.as_bytes())?;
-        out_writer.write_all(b" $end\n")?;
+        out_writer.write_all(b"$end\n")?;
     }
     if let Some(version) = headers.version {
         out_writer.write_all(b"$version ")?;
         out_writer.write_all(version.as_bytes())?;
-        out_writer.write_all(b" $end\n")?;
+        out_writer.write_all(b"$end\n")?;
     }
     if let Some(timescale) = headers.timescale {
         out_writer.write_all(b"$timescale ")?;
         out_writer.write_all(timescale.as_bytes())?;
-        out_writer.write_all(b" $end\n")?;
+        out_writer.write_all(b"$end\n")?;
     }
 
-    for vcd in vcds.iter_mut() {
+    for vcd in vcds.iter() {
         for line in vcd.declarations.iter() {
             out_writer.write_all(line.as_bytes())?;
         }
-        vcd.declarations = Vec::new();
     }
 
     out_writer.write_all(b"$enddefinitions $end\n")?;
 
-    writeln!(out_writer, "$dumpvars").unwrap();
+    let mut heap = std::collections::BinaryHeap::from(
+        sections
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Reverse((s.value, i)))
+            .collect::<Vec<_>>(),
+    );
 
     let mut progress = 0;
-    for vcd in vcds {
-        let memmap = vcd.file;
-        let start = memmap.as_ptr() as usize;
+    'sections: while let Some(mut heap_entry) = heap.peek_mut() {
+        let Reverse((_, index)) = *heap_entry;
+        let section = &mut sections[index];
+        let mut lines = section.section.split(|x| *x == b'\n');
 
-        let lines = memmap[vcd.end_of_definitions..].split(|x| *x == b'\n');
+        // skip the first line
+        if let Some(line) = lines.next() {
+            out_writer.write_all(line)?;
+            out_writer.write_all(b"\n")?;
+        } else {
+            unreachable!("a section always start with a timestamp");
+        }
 
-        for (i, line) in lines.enumerate() {
-            // My test file runs at 17 millions lines per second. Thats is about 270 thousands
-            // lines every 16ms, around ~2^18 = 4 * 2^16 = 0x4_0000.
-            // But I am running this on a SSD, so maybe it is not the best calibration for a HDD
-            // user (if the disk is the bottleneck, that is);
-            if i % 0x4_0000 == 0 {
-                let offset = line.as_ptr() as usize - start;
-                bar.set_position(progress + offset as u64);
-            }
-
+        for line in lines {
             match &line {
                 [b'#', ..] => {
-                    out_writer.write_all(line)?;
-                    out_writer.write_all(b"\n")?;
+                    let offset = line.as_ptr() as usize - section.section.as_ptr() as usize;
+                    let value = parse_u64(&line[1..]).unwrap();
+                    *section = Section {
+                        value,
+                        section: &section.section[offset..],
+                        vcd: section.vcd,
+                    };
+                    *heap_entry = Reverse((value, index));
+
+                    progress += offset as u64;
+                    bar.set_position(progress);
+
+                    continue 'sections;
                 }
                 [b'b', ..] | [b'r', ..] => {
                     let pos = line.iter().position(|c| *c == b' ').unwrap();
                     let (name, symbol) = line.split_at(pos + 1);
-                    let new_symbol =
-                        vcd.symbol_map
-                            .get(&IdCode::from(symbol))
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "symbol not found: {:?}, {:?}",
-                                    &IdCode::from(symbol),
-                                    vcd.symbol_map
-                                )
-                            });
+                    let new_symbol = section
+                        .vcd
+                        .symbol_map
+                        .get(&IdCode::from(symbol))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "symbol not found: {:?}, {:?}",
+                                &IdCode::from(symbol),
+                                section.vcd.symbol_map
+                            )
+                        });
+
                     out_writer.write_all(name)?;
                     out_writer.write_all(new_symbol.as_bytes())?;
                     out_writer.write_all(b"\n")?;
@@ -287,7 +398,8 @@ fn write_output(output: &String, headers: Header, mut vcds: Vec<Vcd>) -> std::io
                 _ => {
                     let value = &line[0..1];
                     let symbol = &line[1..];
-                    let new_symbol = vcd.symbol_map.get(&IdCode::from(symbol)).unwrap();
+                    let new_symbol = section.vcd.symbol_map.get(&IdCode::from(symbol)).unwrap();
+
                     out_writer.write_all(value)?;
                     out_writer.write_all(new_symbol.as_bytes())?;
                     out_writer.write_all(b"\n")?;
@@ -295,7 +407,8 @@ fn write_output(output: &String, headers: Header, mut vcds: Vec<Vcd>) -> std::io
             }
         }
 
-        progress += memmap.len() as u64;
+        // All lines in this section has been written
+        PeekMut::pop(heap_entry);
     }
 
     bar.finish();
