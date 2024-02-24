@@ -176,7 +176,7 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
                 "$timescale" => {
                     let scale = take_to_end(&mut tokens);
 
-                    // parse .*\d*.*(fs|ps|ns|ms|s)
+                    // parse .*\d*.*(fs|ps|ns|us|ms|s)
                     let n = scale
                         .find(|x: char| x.is_ascii_digit())
                         .expect("invalid timestamp");
@@ -184,7 +184,7 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
                         .find(|x: char| !x.is_ascii_digit())
                         .expect("invalid timestamp");
                     let u = scale[n + e..]
-                        .find(['f', 'p', 'n', 'm', 's'])
+                        .find(['f', 'p', 'n', 'u', 'm', 's'])
                         .expect("invalid timestamp");
 
                     let number = parse_u64(scale[n..n + e].as_bytes()).unwrap();
