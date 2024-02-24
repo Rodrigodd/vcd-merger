@@ -6,7 +6,7 @@ use std::io::{BufRead, BufWriter, Write};
 use std::sync::Mutex;
 
 // this can only represent 94^4 = 78_074_896 symbols.
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct IdCode([u8; 4]);
 impl From<&[u8]> for IdCode {
     fn from(s: &[u8]) -> Self {
@@ -25,6 +25,16 @@ impl IdCode {
             }
         }
         &self.0
+    }
+}
+impl std::fmt::Debug for IdCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IdCode(")?;
+        for b in self.as_bytes() {
+            write!(f, "{}", *b as char)?;
+        }
+        write!(f, ")")?;
+        Ok(())
     }
 }
 
@@ -204,9 +214,8 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
                     let old_id = tokens.next().unwrap();
                     let name = take_to_end(&mut tokens);
 
-                    let new_id = next_code();
-
-                    symbol_map.insert(IdCode::from(old_id.as_bytes()), new_id);
+                    let old_id = IdCode::from(old_id.as_bytes());
+                    let new_id = symbol_map.entry(old_id).or_insert_with(next_code);
 
                     declarations.push(format!(
                         "$var {} {} {} {} $end\n",
@@ -273,7 +282,7 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
 
     let symbol_count: usize = vcds.iter().map(|vcd| vcd.symbol_map.len()).sum();
 
-    println!("{} symbols found", symbol_count);
+    println!("{} signals found", symbol_count);
 
     vcds
 }
