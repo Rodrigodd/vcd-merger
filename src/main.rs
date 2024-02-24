@@ -44,6 +44,9 @@ struct Header {
     timescale: Option<String>,
 }
 
+const PROGRESS_BAR_TEMPLATE: &str =
+    "{elapsed_precise} █{bar:60.cyan/blue}█ {bytes}/{total_bytes} {binary_bytes_per_sec} ({eta})";
+
 fn main() {
     let args = std::env::args().collect::<Vec<String>>();
 
@@ -52,18 +55,39 @@ fn main() {
         return;
     }
 
+    let style = indicatif::ProgressStyle::default_bar()
+        .template(PROGRESS_BAR_TEMPLATE)
+        .unwrap()
+        .progress_chars("█▉▊▋▌▍▎▏  ");
+
     let inputs = &args[1..args.len() - 1];
     let output = &args[args.len() - 1];
+
+    println!("[1/3] gathering variables");
 
     let mut headers = Header::default();
 
     let vcds = parse_headers(inputs, &mut headers);
 
-    let sections = find_sections(&vcds);
+    println!("[2/3] finding sections");
 
-    println!("split in {} sections", sections.len());
+    let total_len = vcds.iter().map(|vcd| vcd.file.len() as u64).sum::<u64>();
+    let bar = indicatif::ProgressBar::new(total_len).with_style(style.clone());
+    let on_progress = |progress| bar.set_position(progress);
 
-    write_output(output, headers, &vcds, sections).unwrap();
+    let sections = find_sections(&vcds, on_progress);
+
+    bar.finish();
+
+    println!("[3/3] merging {} sections", sections.len());
+
+    let total_len = sections.iter().map(|s| s.section.len() as u64).sum::<u64>();
+    let bar = indicatif::ProgressBar::new(total_len).with_style(style);
+    let on_progress = |progress| bar.set_position(progress);
+
+    write_output(output, headers, &vcds, sections, on_progress).unwrap();
+
+    bar.finish();
 }
 
 fn next_code() -> IdCode {
@@ -146,8 +170,6 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
                     let name = tokens.next().unwrap();
                     let end = tokens.next().unwrap();
 
-                    println!("{} {}", module, name);
-
                     assert_eq!(end, "$end");
 
                     declarations.push(format!("$scope {} {} $end\n", module, name));
@@ -157,8 +179,6 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
                     let width = tokens.next().unwrap();
                     let old_id = tokens.next().unwrap();
                     let name = take_to_end(&mut tokens);
-
-                    println!("{} {} {} {}", ty, width, old_id, name);
 
                     let new_id = next_code();
 
@@ -175,13 +195,11 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
                 "$upscope" => {
                     let end = tokens.next().unwrap();
                     assert_eq!(end, "$end");
-                    println!("$upscope");
                     declarations.push("$upscope $end\n".to_string());
                 }
                 "$enddefinitions" => {
                     let end = tokens.next().unwrap();
                     assert_eq!(end, "$end");
-                    println!("$enddefinitions $end\n");
                     break;
                 }
                 "$dumpvars" => {
@@ -239,14 +257,25 @@ fn parse_u64(s: &[u8]) -> Result<u64, ()> {
 
 // Find sections of sorted signal changes. These will be merged sorted when written to the output
 // file.
-fn find_sections(vcds: &[Vcd]) -> Vec<Section> {
+fn find_sections(vcds: &[Vcd], mut on_progress: impl FnMut(u64)) -> Vec<Section> {
     let mut sections = Vec::new();
+
+    let mut line_count: usize = 0;
+    let mut progress = 0;
 
     for vcd in vcds {
         let lines = vcd.file[vcd.end_of_definitions..].split(|&b| b == b'\n');
         let mut curr_section = None;
 
         for line in lines {
+            line_count += 1;
+
+            // Same logic as the one described in write_output, but this is 3 times faster
+            if line_count % 0xC_0000 == 0 {
+                let offset = line.as_ptr() as usize - vcd.file.as_ptr() as usize;
+                on_progress(progress + offset as u64);
+            }
+
             if let [b'#', ..] = line {
                 let offset = line.as_ptr() as usize - vcd.file.as_ptr() as usize;
                 let curr_line_value = parse_u64(&line[1..]).unwrap();
@@ -283,6 +312,8 @@ fn find_sections(vcds: &[Vcd]) -> Vec<Section> {
                 vcd,
             });
         }
+
+        progress += vcd.file.len() as u64;
     }
 
     sections
@@ -293,19 +324,10 @@ fn write_output<'a>(
     headers: Header,
     vcds: &'a [Vcd],
     mut sections: Vec<Section<'a>>,
+    mut on_progress: impl FnMut(u64),
 ) -> std::io::Result<()> {
     let out_file = std::fs::File::create(output).unwrap();
     let mut out_writer = BufWriter::with_capacity(0x1_0000, out_file); // 64KiB
-
-    let total_len = sections.iter().map(|s| s.section.len() as u64).sum::<u64>();
-    const TEMPLATE: &str =
-        "{elapsed_precise} █{bar:60.cyan/blue}█ {bytes}/{total_bytes} {binary_bytes_per_sec} ({eta})";
-    let bar = indicatif::ProgressBar::new(total_len).with_style(
-        indicatif::ProgressStyle::default_bar()
-            .template(TEMPLATE)
-            .unwrap()
-            .progress_chars("█▉▊▋▌▍▎▏  "),
-    );
 
     if let Some(date) = headers.date {
         out_writer.write_all(b"$date ")?;
@@ -362,6 +384,7 @@ fn write_output<'a>(
 
         for line in lines {
             progress += line.len() as u64 + 1;
+
             line_count += 1;
 
             // My test file runs at 17 millions lines per second. Thats is about 270 thousands
@@ -369,7 +392,7 @@ fn write_output<'a>(
             // But I am running this on a SSD, so maybe it is not the best calibration for a HDD
             // user (if the disk is the bottleneck, that is);
             if line_count % 0x4_0000 == 0 {
-                bar.set_position(progress);
+                on_progress(progress);
             }
 
             match &line {
@@ -425,8 +448,6 @@ fn write_output<'a>(
         // All lines in this section has been written
         PeekMut::pop(heap_entry);
     }
-
-    bar.finish();
 
     Ok(())
 }
