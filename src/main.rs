@@ -35,6 +35,8 @@ struct Vcd {
     declarations: Vec<String>,
     file: Mmap,
     end_of_definitions: usize,
+    /// The timescale ratio between this input timescale and the output timescale.
+    timescale: u64,
 }
 
 #[derive(Default)]
@@ -63,7 +65,7 @@ fn main() {
     let inputs = &args[1..args.len() - 1];
     let output = &args[args.len() - 1];
 
-    println!("[1/3] gathering variables");
+    println!("[1/3] gathering symbols");
 
     let mut headers = Header::default();
 
@@ -145,6 +147,8 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
 
         let mut declarations = Vec::new();
 
+        let mut timescale = 0;
+
         while let Some(token) = tokens.next() {
             match token.as_str() {
                 "$date" => {
@@ -161,9 +165,29 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
                 }
                 "$timescale" => {
                     let scale = take_to_end(&mut tokens);
-                    if header.timescale.is_none() {
-                        header.timescale = Some(scale);
-                    }
+
+                    // parse .*\d*.*(fs|ps|ns|ms|s)
+                    let n = scale
+                        .find(|x: char| x.is_ascii_digit())
+                        .expect("invalid timestamp");
+                    let e = scale[n..]
+                        .find(|x: char| !x.is_ascii_digit())
+                        .expect("invalid timestamp");
+                    let u = scale[n + e..]
+                        .find(['f', 'p', 'n', 'm', 's'])
+                        .expect("invalid timestamp");
+
+                    let number = parse_u64(scale[n..n + e].as_bytes()).unwrap();
+                    let unit = &scale[n + e + u..];
+                    timescale = match unit[..2].as_bytes() {
+                        b"fs" => number,
+                        b"ps" => number * 1_000,
+                        b"ns" => number * 1_000_000,
+                        b"us" => number * 1_000_000_000,
+                        b"ms" => number * 1_000_000_000_000,
+                        [b's', _] => number * 1_000_000_000_000_000,
+                        _ => panic!("invalid timestamp"),
+                    };
                 }
                 "$scope" => {
                     let module = tokens.next().unwrap();
@@ -211,15 +235,58 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
             }
         }
 
+        if timescale == 0 {
+            panic!("missing timescale");
+        }
+
         let vcd = Vcd {
             symbol_map,
             declarations,
             end_of_definitions: reader.position() as usize,
             file: reader.into_inner(),
+            timescale,
         };
         vcds.push(vcd);
     }
+
+    let gcd = vcds
+        .iter()
+        .map(|vcd| vcd.timescale)
+        .fold(vcds[0].timescale, gcd);
+
+    for vcd in &mut vcds {
+        vcd.timescale /= gcd;
+    }
+
+    let timescale = match gcd {
+        x if x % 1_000_000_000_000_000 == 0 => format!("{}s", x / 1_000_000_000_000_000),
+        x if x % 1_000_000_000_000 == 0 => format!("{}ms", x / 1_000_000_000_000),
+        x if x % 1_000_000_000 == 0 => format!("{}us", x / 1_000_000_000),
+        x if x % 1_000_000 == 0 => format!("{}ns", x / 1_000_000),
+        x if x % 1_000 == 0 => format!("{}ps", x / 1_000),
+        x => format!("{}fs", x),
+    };
+
+    println!("timescale set to {}", timescale);
+
+    header.timescale = Some(timescale);
+
+    let symbol_count: usize = vcds.iter().map(|vcd| vcd.symbol_map.len()).sum();
+
+    println!("{} symbols found", symbol_count);
+
     vcds
+}
+
+fn gcd(mut n: u64, mut m: u64) -> u64 {
+    assert!(n != 0 && m != 0);
+    while m != 0 {
+        if m < n {
+            (m, n) = (n, m);
+        }
+        m %= n;
+    }
+    n
 }
 
 struct Section<'a> {
@@ -255,6 +322,16 @@ fn parse_u64(s: &[u8]) -> Result<u64, ()> {
     Ok(value)
 }
 
+fn u64_to_bytes(mut value: u64, buffer: &mut [u8; 20]) -> &[u8] {
+    let mut i = buffer.len();
+    while value > 0 {
+        i -= 1;
+        buffer[i] = (value % 10) as u8 + b'0';
+        value /= 10;
+    }
+    &buffer[i..]
+}
+
 // Find sections of sorted signal changes. These will be merged sorted when written to the output
 // file.
 fn find_sections(vcds: &[Vcd], mut on_progress: impl FnMut(u64)) -> Vec<Section> {
@@ -278,7 +355,7 @@ fn find_sections(vcds: &[Vcd], mut on_progress: impl FnMut(u64)) -> Vec<Section>
 
             if let [b'#', ..] = line {
                 let offset = line.as_ptr() as usize - vcd.file.as_ptr() as usize;
-                let curr_line_value = parse_u64(&line[1..]).unwrap();
+                let curr_line_value = parse_u64(&line[1..]).unwrap() * vcd.timescale;
 
                 // if this is the first line, start a new section
                 let Some((section_offset, section_value, last_line_value)) = curr_section else {
@@ -372,9 +449,10 @@ fn write_output<'a>(
         let mut lines = section.section.split(|x| *x == b'\n');
 
         // write the timestamp
-        if let Some(line) = lines.next() {
+        if let Some(_line) = lines.next() {
             if last_timestamp != Some(section.value) {
-                out_writer.write_all(line)?;
+                out_writer.write_all(b"#")?;
+                out_writer.write_all(u64_to_bytes(section.value, &mut [0; 20]))?;
                 out_writer.write_all(b"\n")?;
             }
             last_timestamp = Some(section.value);
@@ -398,7 +476,7 @@ fn write_output<'a>(
             match &line {
                 [b'#', ..] => {
                     let offset = line.as_ptr() as usize - section.section.as_ptr() as usize;
-                    let value = parse_u64(&line[1..]).unwrap();
+                    let value = parse_u64(&line[1..]).unwrap() * section.vcd.timescale;
                     *section = Section {
                         value,
                         section: &section.section[offset..],
