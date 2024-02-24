@@ -431,7 +431,7 @@ fn write_output<'a>(
     if let Some(timescale) = headers.timescale {
         out_writer.write_all(b"$timescale ")?;
         out_writer.write_all(timescale.as_bytes())?;
-        out_writer.write_all(b"$end\n")?;
+        out_writer.write_all(b" $end\n")?;
     }
 
     for vcd in vcds.iter() {
