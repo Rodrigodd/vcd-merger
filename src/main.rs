@@ -332,6 +332,9 @@ fn parse_u64(s: &[u8]) -> Result<u64, ()> {
 }
 
 fn u64_to_bytes(mut value: u64, buffer: &mut [u8; 20]) -> &[u8] {
+    if value == 0 {
+        return b"0";
+    }
     let mut i = buffer.len();
     while value > 0 {
         i -= 1;
