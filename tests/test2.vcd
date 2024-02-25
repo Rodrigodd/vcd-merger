@@ -1,0 +1,39 @@
+$timescale 500 us $end
+$scope module test2 $end
+$var wire 1 ! clk $end
+$var wire 1 !@# foo $end
+$var wire 2 !@# same_foo $end
+$upscope $end
+$enddefinitions $end
+#10
+b01 !@#
+1!
+#11
+1!
+#12
+1!
+#13
+1!
+#9
+b10 !@#
+1!
+#8
+1!
+#8
+1!
+#7
+1!
+#6
+b1x !@#
+1!
+#4
+1!
+#1
+#1
+1!
+#0
+1!
+#32
+#4
+1!
+bxx !@#

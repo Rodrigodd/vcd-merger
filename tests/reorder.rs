@@ -9,12 +9,14 @@ fn reorder() -> Result<(), Box<dyn std::error::Error>> {
 
     let output = assert_fs::NamedTempFile::new("out.vcd")?;
 
-    cmd.arg("tests/reorder.vcd").arg(output.path());
+    cmd.arg("tests/test1.vcd")
+        .arg("tests/test2.vcd")
+        .arg(output.path());
 
     cmd.assert().success();
 
     output.assert(predicate::path::exists());
-    output.assert(predicate::path::eq_file("tests/reorder_expected.vcd"));
+    output.assert(predicate::path::eq_file("tests/expected.vcd"));
 
     Ok(())
 }
