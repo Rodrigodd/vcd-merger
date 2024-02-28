@@ -3,6 +3,7 @@ use memmap2::Mmap;
 use std::cmp::Reverse;
 use std::collections::binary_heap::PeekMut;
 use std::io::{BufRead, BufWriter, Write};
+use std::path::Path;
 use std::sync::Mutex;
 
 // this can only represent 94^4 = 78_074_896 symbols.
@@ -56,42 +57,100 @@ struct Header {
     timescale: Option<String>,
 }
 
-const PROGRESS_BAR_TEMPLATE: &str =
-    "{elapsed_precise} █{bar:60.cyan/blue}█ {bytes}/{total_bytes} {binary_bytes_per_sec} ({eta})";
+const DESCRIPTION: &str = "\
+A tool for merging multiple VCD (Value Change Dump) files together. This will
+concatenate all signals from all the input files, side-by-side, merge-sorting
+the timestamps, making it easier to view all files at the same time in a wave
+visualizer, like GTKWave.";
+
+const USAGE: &str = "\
+Usage: vcd-merger <input.vcd> [<input.vcd> *] <output.vcd> [--reorder] [--help]";
+
+const HELP: &str = "\
+Arguments:
+  <input>*    VCD files to be merged together.
+  <output>    File where the merged VCD will be written.
+
+Options:
+  --reorder   Don't assume that timestamps in each VCD files are sorted, and
+              sort them too.
+  --help      Print this help screen.";
+
+const PROGRESS_BAR_TEMPLATE: &str = "\
+{elapsed_precise} █{bar:60.cyan/blue}█ {bytes}/{total_bytes} {binary_bytes_per_sec} ({eta})";
 
 fn main() {
     let args = std::env::args().collect::<Vec<String>>();
+    let mut files = Vec::new();
+    let mut reorder = false;
 
-    if args.len() < 3 {
-        println!("usage: vcd-merger <input.vcd> [<input.vcd> *] <output.vcd>");
-        return;
+    for arg in args.iter() {
+        if arg.starts_with("--") {
+            match &arg[..] {
+                "--help" => {
+                    println!("{}\n\n{}\n\n{}", DESCRIPTION, USAGE, HELP);
+                    std::process::exit(1);
+                }
+                "--reorder" => reorder = true,
+                _ => {
+                    eprintln!("error: unknown option {:?}.", &arg);
+                    println!("{}", USAGE);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            files.push(arg);
+        }
     }
+
+    if files.len() < 2 {
+        println!("{}", USAGE);
+        std::process::exit(1);
+    }
+
+    let inputs = &files[1..files.len() - 1];
+    let output = &files[files.len() - 1];
 
     let style = indicatif::ProgressStyle::default_bar()
         .template(PROGRESS_BAR_TEMPLATE)
         .unwrap()
         .progress_chars("█▉▊▋▌▍▎▏  ");
 
-    let inputs = &args[1..args.len() - 1];
-    let output = &args[args.len() - 1];
+    let mut count = 0;
+    let total = if reorder { 3 } else { 2 };
 
-    println!("[1/3] gathering symbols");
+    count += 1;
+    println!("[{count}/{total}] gathering symbols");
 
     let mut headers = Header::default();
 
-    let vcds = parse_headers(inputs, &mut headers);
+    let vcds = parse_headers(inputs.iter(), &mut headers);
 
-    println!("[2/3] finding sections");
+    let sections = if !reorder {
+        vcds.iter()
+            .map(|vcd| Section {
+                value: 0,
+                section: &vcd.file,
+                vcd,
+            })
+            .collect()
+    } else {
+        count += 1;
+        println!("[{count}/{total}] finding sections");
 
-    let total_len = vcds.iter().map(|vcd| vcd.file.len() as u64).sum::<u64>();
-    let bar = indicatif::ProgressBar::new(total_len).with_style(style.clone());
-    let on_progress = |progress| bar.set_position(progress);
+        let total_len = vcds.iter().map(|vcd| vcd.file.len() as u64).sum::<u64>();
+        let bar = indicatif::ProgressBar::new(total_len).with_style(style.clone());
+        let on_progress = |progress| bar.set_position(progress);
 
-    let sections = find_sections(&vcds, on_progress);
+        let sections = find_sections(&vcds, on_progress);
 
-    bar.finish();
+        bar.finish();
 
-    println!("[3/3] merging {} sections", sections.len());
+        sections
+    };
+
+    count += 1;
+    println!("[{count}/{total}] merging {} sections", sections.len());
 
     let total_len = sections.iter().map(|s| s.section.len() as u64).sum::<u64>();
     let bar = indicatif::ProgressBar::new(total_len).with_style(style);
@@ -137,133 +196,162 @@ fn take_to_end(tokens: &mut impl Iterator<Item = String>) -> String {
     scale
 }
 
-fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
-    let mut vcds = Vec::new();
-    for input in inputs {
-        let file = std::fs::File::open(input).unwrap();
-        // let mut reader = BufReader::with_capacity(0x1_0000, file);
-        let memmap = unsafe { memmap2::MmapOptions::new().map(&file).unwrap() };
-        let mut reader = std::io::Cursor::new(memmap);
+fn parse_headers<'a, 'b>(
+    inputs: impl Iterator<Item = impl AsRef<Path>> + 'b,
+    header: &mut Header,
+) -> Vec<Vcd> {
+    let mut vcds: Vec<Vcd> = inputs
+        .map(|input| parse_header(input.as_ref(), header))
+        .collect();
 
-        let mut lines = (&mut reader).lines().map_while(Result::ok);
+    set_common_timescale(&mut vcds, header);
 
-        let mut tokens = lines.by_ref().flat_map(|line| {
-            line.split_ascii_whitespace()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        });
+    vcds
+}
 
-        let mut symbol_map = HashMap::default();
+fn parse_header(input: &Path, header: &mut Header) -> Vcd {
+    let file = std::fs::File::open(input);
 
-        let mut declarations = Vec::new();
+    let file = match file {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("Coud not open {}: {}", input.display(), err);
+            std::process::exit(2);
+        }
+    };
 
-        let mut timescale = 0;
+    // let mut reader = BufReader::with_capacity(0x1_0000, file);
+    let memmap = unsafe { memmap2::MmapOptions::new().map(&file) };
 
-        while let Some(token) = tokens.next() {
-            match token.as_str() {
-                "$date" => {
-                    let date = take_to_end(&mut tokens);
-                    if header.date.is_none() {
-                        header.date = Some(date);
-                    }
-                }
-                "$version" => {
-                    let version = take_to_end(&mut tokens);
-                    if header.version.is_none() {
-                        header.version = Some(version);
-                    }
-                }
-                "$timescale" => {
-                    let scale = take_to_end(&mut tokens);
+    let memmap = match memmap {
+        Ok(x) => x,
+        Err(err) => {
+            eprintln!("Could not memmap {}: {}", input.display(), err);
+            std::process::exit(3);
+        }
+    };
 
-                    // parse .*\d*.*(fs|ps|ns|us|ms|s)
-                    let n = scale
-                        .find(|x: char| x.is_ascii_digit())
-                        .expect("invalid timestamp");
-                    let e = scale[n..]
-                        .find(|x: char| !x.is_ascii_digit())
-                        .expect("invalid timestamp");
-                    let u = scale[n + e..]
-                        .find(['f', 'p', 'n', 'u', 'm', 's'])
-                        .expect("invalid timestamp");
+    let mut reader = std::io::Cursor::new(memmap);
 
-                    let number = parse_u64(scale[n..n + e].as_bytes()).unwrap();
-                    let unit = &scale[n + e + u..];
-                    timescale = match unit[..2].as_bytes() {
-                        b"fs" => number,
-                        b"ps" => number * 1_000,
-                        b"ns" => number * 1_000_000,
-                        b"us" => number * 1_000_000_000,
-                        b"ms" => number * 1_000_000_000_000,
-                        [b's', _] => number * 1_000_000_000_000_000,
-                        _ => panic!("invalid timestamp"),
-                    };
-                }
-                "$scope" => {
-                    let module = tokens.next().unwrap();
-                    let name = tokens.next().unwrap();
-                    let end = tokens.next().unwrap();
+    let mut lines = (&mut reader).lines().map_while(Result::ok);
 
-                    assert_eq!(end, "$end");
+    let mut tokens = lines.by_ref().flat_map(|line| {
+        line.split_ascii_whitespace()
+            .map(String::from)
+            .collect::<Vec<_>>()
+    });
 
-                    declarations.push(format!("$scope {} {} $end\n", module, name));
-                }
-                "$var" => {
-                    let ty = tokens.next().unwrap();
-                    let width = tokens.next().unwrap();
-                    let old_id = tokens.next().unwrap();
-                    let name = take_to_end(&mut tokens);
+    let mut symbol_map = HashMap::default();
 
-                    let old_id = IdCode::from(old_id.as_bytes());
-                    let new_id = symbol_map.entry(old_id).or_insert_with(next_code);
+    let mut declarations = Vec::new();
 
-                    declarations.push(format!(
-                        "$var {} {} {} {} $end\n",
-                        ty,
-                        width,
-                        std::str::from_utf8(new_id.as_bytes()).unwrap(),
-                        name.trim()
-                    ));
-                }
-                "$upscope" => {
-                    let end = tokens.next().unwrap();
-                    assert_eq!(end, "$end");
-                    declarations.push("$upscope $end\n".to_string());
-                }
-                "$enddefinitions" => {
-                    let end = tokens.next().unwrap();
-                    assert_eq!(end, "$end");
-                    break;
-                }
-                "$dumpvars" => {
-                    break;
-                }
-                _ => {
-                    break;
+    let mut timescale = 0;
+
+    while let Some(token) = tokens.next() {
+        match token.as_str() {
+            "$date" => {
+                let date = take_to_end(&mut tokens);
+                if header.date.is_none() {
+                    header.date = Some(date);
                 }
             }
-        }
+            "$version" => {
+                let version = take_to_end(&mut tokens);
+                if header.version.is_none() {
+                    header.version = Some(version);
+                }
+            }
+            "$timescale" => {
+                let scale = take_to_end(&mut tokens);
 
-        if timescale == 0 {
-            panic!("missing timescale");
-        }
+                // parse .*\d*.*(fs|ps|ns|us|ms|s)
+                let n = scale
+                    .find(|x: char| x.is_ascii_digit())
+                    .expect("invalid timestamp");
+                let e = scale[n..]
+                    .find(|x: char| !x.is_ascii_digit())
+                    .expect("invalid timestamp");
+                let u = scale[n + e..]
+                    .find(['f', 'p', 'n', 'u', 'm', 's'])
+                    .expect("invalid timestamp");
 
-        let vcd = Vcd {
-            symbol_map,
-            declarations,
-            end_of_definitions: reader.position() as usize,
-            file: reader.into_inner(),
-            timescale,
-        };
-        vcds.push(vcd);
+                let number = parse_u64(scale[n..n + e].as_bytes()).unwrap();
+                let unit = &scale[n + e + u..];
+                timescale = match unit[..2].as_bytes() {
+                    b"fs" => number,
+                    b"ps" => number * 1_000,
+                    b"ns" => number * 1_000_000,
+                    b"us" => number * 1_000_000_000,
+                    b"ms" => number * 1_000_000_000_000,
+                    [b's', _] => number * 1_000_000_000_000_000,
+                    _ => panic!("invalid timestamp"),
+                };
+            }
+            "$scope" => {
+                let module = tokens.next().unwrap();
+                let name = tokens.next().unwrap();
+                let end = tokens.next().unwrap();
+
+                assert_eq!(end, "$end");
+
+                declarations.push(format!("$scope {} {} $end\n", module, name));
+            }
+            "$var" => {
+                let ty = tokens.next().unwrap();
+                let width = tokens.next().unwrap();
+                let old_id = tokens.next().unwrap();
+                let name = take_to_end(&mut tokens);
+
+                let old_id = IdCode::from(old_id.as_bytes());
+                let new_id = symbol_map.entry(old_id).or_insert_with(next_code);
+
+                declarations.push(format!(
+                    "$var {} {} {} {} $end\n",
+                    ty,
+                    width,
+                    std::str::from_utf8(new_id.as_bytes()).unwrap(),
+                    name.trim()
+                ));
+            }
+            "$upscope" => {
+                let end = tokens.next().unwrap();
+                assert_eq!(end, "$end");
+                declarations.push("$upscope $end\n".to_string());
+            }
+            "$enddefinitions" => {
+                let end = tokens.next().unwrap();
+                assert_eq!(end, "$end");
+                break;
+            }
+            "$dumpvars" => {
+                break;
+            }
+            _ => {
+                break;
+            }
+        }
     }
 
+    if timescale == 0 {
+        panic!("missing timescale");
+    }
+
+    Vcd {
+        symbol_map,
+        declarations,
+        end_of_definitions: reader.position() as usize,
+        file: reader.into_inner(),
+        timescale,
+    }
+}
+
+fn set_common_timescale(vcds: &mut [Vcd], header: &mut Header) {
     let gcd = vcds
         .iter()
         .map(|vcd| vcd.timescale)
         .fold(vcds[0].timescale, gcd);
 
-    for vcd in &mut vcds {
+    for vcd in vcds.iter_mut() {
         vcd.timescale /= gcd;
     }
 
@@ -283,8 +371,6 @@ fn parse_headers(inputs: &[String], header: &mut Header) -> Vec<Vcd> {
     let symbol_count: usize = vcds.iter().map(|vcd| vcd.symbol_map.len()).sum();
 
     println!("{} signals found", symbol_count);
-
-    vcds
 }
 
 fn gcd(mut n: u64, mut m: u64) -> u64 {
@@ -409,13 +495,26 @@ fn find_sections(vcds: &[Vcd], mut on_progress: impl FnMut(u64)) -> Vec<Section>
 }
 
 fn write_output<'a>(
-    output: &String,
+    output: impl AsRef<Path>,
     headers: Header,
     vcds: &'a [Vcd],
     mut sections: Vec<Section<'a>>,
     mut on_progress: impl FnMut(u64),
 ) -> std::io::Result<()> {
-    let out_file = std::fs::File::create(output).unwrap();
+    let out_file = std::fs::File::create(output.as_ref());
+
+    let out_file = match out_file {
+        Ok(x) => x,
+        Err(err) => {
+            eprintln!(
+                "Could not create file {}: {}",
+                output.as_ref().display(),
+                err
+            );
+            std::process::exit(4);
+        }
+    };
+
     let mut out_writer = BufWriter::with_capacity(0x1_0000, out_file); // 64KiB
 
     if let Some(date) = headers.date {
