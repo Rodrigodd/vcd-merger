@@ -1,10 +1,13 @@
+use clap::Parser;
 use fxhash::FxHashMap as HashMap;
 use memmap2::Mmap;
-use std::cmp::Reverse;
-use std::collections::binary_heap::PeekMut;
-use std::io::{BufRead, BufWriter, Write};
-use std::path::Path;
-use std::sync::Mutex;
+use std::{
+    cmp::Reverse,
+    collections::binary_heap::PeekMut,
+    io::{BufRead, BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 // this can only represent 94^4 = 78_074_896 symbols.
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -57,59 +60,34 @@ struct Header {
     timescale: Option<String>,
 }
 
-const DESCRIPTION: &str = "\
-A tool for merging multiple VCD (Value Change Dump) files together. This will
-concatenate all signals from all the input files, side-by-side, merge-sorting
-the timestamps, making it easier to view all files at the same time in a wave
-visualizer, like GTKWave.";
+/// A tool for merging multiple VCD (Value Change Dump) files together. This will
+/// concatenate all signals from all the input files, side-by-side, merge-sorting
+/// the timestamps, making it easier to view all files at the same time in a wave
+/// visualizer, like GTKWave.
+#[derive(Parser)]
+struct Cli {
+    /// VCD files to be merged together.
+    input: Vec<PathBuf>,
 
-const USAGE: &str = "\
-Usage: vcd-merger <input.vcd> [<input.vcd> *] <output.vcd> [--reorder] [--help]";
+    /// File where the merged VCD will be written.
+    #[arg(short, long)]
+    output: PathBuf,
 
-const HELP: &str = "\
-Arguments:
-  <input>*    VCD files to be merged together.
-  <output>    File where the merged VCD will be written.
-
-Options:
-  --reorder   Don't assume that timestamps in each VCD files are sorted, and
-              sort them too.
-  --help      Print this help screen.";
+    /// Don't assume that timestamps in each VCD files are sorted, and
+    /// sort them too.
+    #[arg(short, long)]
+    reorder: bool,
+}
 
 const PROGRESS_BAR_TEMPLATE: &str = "\
 {elapsed_precise} █{bar:60.cyan/blue}█ {bytes}/{total_bytes} {binary_bytes_per_sec} ({eta})";
 
 fn main() {
-    let args = std::env::args().collect::<Vec<String>>();
-    let mut files = Vec::new();
-    let mut reorder = false;
+    let args = Cli::parse();
 
-    for arg in args.iter() {
-        if arg.starts_with("--") {
-            match &arg[..] {
-                "--help" => {
-                    println!("{}\n\n{}\n\n{}", DESCRIPTION, USAGE, HELP);
-                    std::process::exit(1);
-                }
-                "--reorder" => reorder = true,
-                _ => {
-                    eprintln!("error: unknown option {:?}.", &arg);
-                    println!("{}", USAGE);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            files.push(arg);
-        }
-    }
-
-    if files.len() < 2 {
-        println!("{}", USAGE);
-        std::process::exit(1);
-    }
-
-    let inputs = &files[1..files.len() - 1];
-    let output = &files[files.len() - 1];
+    let inputs = &args.input;
+    let output = &args.output;
+    let reorder = args.reorder;
 
     let style = indicatif::ProgressStyle::default_bar()
         .template(PROGRESS_BAR_TEMPLATE)

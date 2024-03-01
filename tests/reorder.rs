@@ -11,7 +11,9 @@ fn reorder() -> Result<(), Box<dyn std::error::Error>> {
 
     cmd.arg("tests/test1.vcd")
         .arg("tests/test2.vcd")
-        .arg(output.path());
+        .arg("-o")
+        .arg(output.path())
+        .arg("--reorder");
 
     cmd.assert().success();
 
