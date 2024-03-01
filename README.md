@@ -5,6 +5,12 @@ concatenate all signals from all the input files, side-by-side, merge-sorting
 the timestamps, making it easier to view all files at the same time in a wave
 visualizer, like GTKWave.
 
+![2024-02-29_22h29m15s_screenshot](https://github.com/Rodrigodd/vcd-merger/assets/51273772/1e21c935-eca1-42e0-ba80-709f416410ad)
+
+In the example two traces ("gameroy" and "dmg_cpu_b_gameboy") where combined
+in a single file for easier visualization. The merged VCD were converted to
+FST first (using GTKWave's `vcd2fst`), to speed up loading in GTKWave.
+
 ## Usage
 
 ```shell
