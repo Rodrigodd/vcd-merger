@@ -106,10 +106,25 @@ fn main() {
 
     let sections = if !reorder {
         vcds.iter()
-            .map(|vcd| Section {
-                value: 0,
-                section: &vcd.file,
-                vcd,
+            .map(|vcd| {
+                let needle = b"\n$enddefinitions";
+                let end_of_header = vcd
+                    .file
+                    .windows(needle.len())
+                    .position(|x| x == needle)
+                    .map(|x| x + needle.len())
+                    .unwrap();
+                let needle2 = b"$end";
+                let end = vcd.file[end_of_header..]
+                    .windows(needle2.len())
+                    .position(|x| x == needle2)
+                    .map(|x| end_of_header + x + needle2.len())
+                    .unwrap();
+                Section {
+                    value: 0,
+                    section: &vcd.file[end..],
+                    vcd,
+                }
             })
             .collect()
     } else {
