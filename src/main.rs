@@ -319,6 +319,10 @@ fn parse_header(input: &Path, header: &mut Header) -> Vcd {
             "$dumpvars" => {
                 break;
             }
+            "$comment" => {
+                let comment = take_to_end(&mut tokens);
+                declarations.push(format!("$comment {} $end\n", comment.trim()));
+            }
             _ => {
                 break;
             }
