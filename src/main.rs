@@ -554,7 +554,10 @@ fn write_output<'a>(
     'sections: while let Some(mut heap_entry) = heap.peek_mut() {
         let Reverse((_, index)) = *heap_entry;
         let section = &mut sections[index];
-        let mut lines = section.section.split(|x| *x == b'\n');
+        let mut lines = section
+            .section
+            .split(|&b| b == b'\n')
+            .map(|x| x.trim_ascii_end());
 
         // write the timestamp
         if let Some(_line) = lines.next() {
@@ -622,7 +625,17 @@ fn write_output<'a>(
                 _ => {
                     let value = &line[0..1];
                     let symbol = &line[1..];
-                    let new_symbol = section.vcd.symbol_map.get(&IdCode::from(symbol)).unwrap();
+                    let new_symbol = section
+                        .vcd
+                        .symbol_map
+                        .get(&IdCode::from(symbol))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "symbol not found: {:?}, {:?}",
+                                &IdCode::from(symbol),
+                                section.vcd.symbol_map
+                            )
+                        });
 
                     out_writer.write_all(value)?;
                     out_writer.write_all(new_symbol.as_bytes())?;
